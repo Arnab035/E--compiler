@@ -1,0 +1,597 @@
+%{
+
+#include "Ast.h"
+#include "ParserUtil.h"
+#include "Error.h"
+
+using namespace std;
+
+extern int verbosity;
+extern int yylex();
+extern void yyerror(const char *s);
+int offSet;
+extern const OpNode::OpInfo opInfo[];
+
+/* global scope declaration */
+
+Type* ty = new Type;
+
+vector<string>* id = new vector<string>;
+GlobalEntry* ge;
+
+typedef std::list<StmtNode*>::iterator it;
+
+typedef std::list<ExprNode*>::iterator it2;
+
+
+%}
+
+%union{
+  unsigned int       uVal;
+  double             dVal;
+  char*              cVal;
+  vector<string>*    strVector;
+  Value*             valVal;
+
+  ExprNode*          exprVal;
+  vector<ExprNode*>* exprList;
+  RefExprNode*       refexpVal;
+
+  ClassEntry*        classEntry;
+  Type*              typeVal;
+  vector<Type*>*     typeList; 
+
+  EventEntry*        eventEntry;                        
+  VariableEntry*     variableEntry;
+  FunctionEntry*     functionEntry;
+
+  BasePatNode*       patVal;
+  PrimitivePatNode*  primPatVal;
+  StmtNode*          stmtVal;
+  list<StmtNode*>*   stmtList;
+  IfNode*            ifVal;
+  CompoundStmtNode*  compoundStmtVal;
+  RuleNode*          ruleNode;
+
+  vector<RuleNode*>* transList;
+  
+  vector<Type*>*     formalTypeVal;
+  const OpNode::OpInfo*    funIval;
+  
+};
+
+/* Operators */
+
+%token TOK_LEX_ERROR TOK_PAT_STAR TOK_PAT_OR TOK_PAT_NOT
+%token TOK_PLUS TOK_MINUS TOK_UMINUS TOK_MULT TOK_DIV TOK_MOD 
+%token TOK_BITAND TOK_BITOR TOK_BITNOT TOK_BITXOR TOK_SHL TOK_SHR 
+%token TOK_GT TOK_LT TOK_GE TOK_LE TOK_EQ  TOK_NE TOK_AND TOK_OR TOK_NOT 
+%token TOK_COMMA TOK_ASSIGN TOK_SEMICOLON TOK_COLON TOK_ARROW
+%token TOK_LBRACE TOK_RBRACE TOK_LPAREN TOK_RPAREN
+
+/* Key words */
+
+%token TOK_IF TOK_ELSE TOK_CLASS TOK_RETURN TOK_EVENT TOK_ANY TOK_PRINT 
+%token TOK_UINTNUM TOK_DOUBLENUM TOK_VOID TOK_STRING TOK_STRCONST 
+%token TOK_INT TOK_UNSIGNED TOK_BOOL TOK_BYTE TOK_DOUBLE TOK_SHORT
+%token TOK_TRUE TOK_FALSE TOK_IDENT
+
+/******************************** Type Info ********************************/
+
+%type <functionEntry> function_header function_decl function_name
+%type <variableEntry> variable_decl formal_param variable_decl1
+%type <typeList> formal_param_list formal_param_plus 
+%type <eventEntry> event_decl_hdr event_decl
+%type <patVal> event_pattern 
+%type <primPatVal> primitive_pat 
+%type <typeVal> type baseType 
+%type <exprList> expr_list expr_plus
+%type <exprVal> expr function_invocation asg_stmt
+%type <refexpVal> ref_expr
+%type <ruleNode> rule
+%type <strVector> id_list id_plus
+%type <classEntry> class_decl              /*** added ***/
+%type <transList> rule_star                /*** added ***/
+
+%type <cVal> TOK_IDENT event 
+%type <uVal> TOK_UINTNUM 
+%type <dVal> TOK_DOUBLENUM 
+%type <cVal> TOK_STRCONST
+
+%type <valVal> literal
+
+%type <stmtList> stmt_plus
+%type <stmtVal> stmt simple_stmt
+%type <compoundStmtVal> compoundStmt fun_rest
+%type <ifVal>  if_then_else_stmt 
+
+
+/*********************   Precedence and Associativity    ********************/
+
+%nonassoc TOK_ASSIGN
+
+%left  TOK_PAT_OR 
+%left  TOK_COLON
+%left  TOK_PAT_STAR
+%right TOK_PAT_NOT
+
+%left  TOK_OR
+%left  TOK_AND
+%right TOK_NOT
+
+%nonassoc TOK_EQ TOK_NE TOK_GT TOK_LT TOK_GE TOK_LE
+
+%left  TOK_BITOR TOK_BITXOR
+%left  TOK_BITAND
+%right TOK_BITNOT 
+%left  TOK_SHL TOK_SHR
+
+%right TOK_DOUBLE_COLON
+
+%left  TOK_PLUS TOK_MINUS
+%left  TOK_MULT TOK_DIV TOK_MOD
+%right TOK_UMINUS 
+
+%left  TOK_LBRACK
+%left  TOK_DOT
+
+/**************************************************************************/
+
+%start specification
+%%
+
+
+specification: ifc_decl_star rule_star {};
+
+ifc_decl_star: %empty   {}
+| ifc_decl_star ifc_decl
+;
+
+ifc_decl: TOK_SEMICOLON
+| class_decl TOK_SEMICOLON
+| variable_decl TOK_SEMICOLON
+| variable_decl1 TOK_SEMICOLON
+| event_decl TOK_SEMICOLON
+| function_decl TOK_SEMICOLON
+
+/********** CLASS DECLARATION ************/
+
+class_decl: TOK_CLASS TOK_IDENT {
+		$$ = new ClassEntry($2);
+		stm.insert($$);
+		$$->print(cout, 0);
+		};
+
+/********** VARIABLE DECLARATION ***********/
+
+variable_decl: type TOK_IDENT{
+		SymTabEntry *ste = stm.currentScope();
+		ty = $1;
+		if(ste->kind() == SymTabEntry::Kind::GLOBAL_KIND){
+			$$ = new VariableEntry($2, VariableEntry::VarKind::GLOBAL_VAR, ty);
+		}
+		else if(ste->kind() == SymTabEntry::Kind::FUNCTION_KIND){
+			$$ = new VariableEntry($2, VariableEntry::VarKind::GLOBAL_VAR, ty);
+		}
+		ErrorST est = ste->insert($$);
+		if(est == DUPLICATE_SYM){
+			errMsg("Duplicate variable declaration");
+		}
+		$$->print(cout, 0);
+		cout << endl; 
+
+		}
+| variable_decl TOK_COMMA TOK_IDENT{
+		SymTabEntry* ste = stm.currentScope();
+		if(ste->kind() == SymTabEntry::Kind::GLOBAL_KIND){
+			$$ = new VariableEntry($3, VariableEntry::VarKind::GLOBAL_VAR, ty);
+		}
+		else if(ste->kind() == SymTabEntry::Kind::FUNCTION_KIND){
+			$$ = new VariableEntry($3, VariableEntry::VarKind::LOCAL_VAR, ty);
+		}
+		ErrorST est = ste->insert($$);
+		if(est == DUPLICATE_SYM){
+			errMsg("Duplicate variable declaration");
+		}
+		cout << ", ";
+		$$->print(cout, 0);	
+	};
+
+/*********  VARIABLE DECLARATIONS WITH INITIAL VALUES *******/
+
+variable_decl1: type TOK_IDENT TOK_ASSIGN expr {
+		SymTabEntry* ste = stm.currentScope();
+		ty = $1;
+		if(ste->kind() == SymTabEntry::Kind::GLOBAL_KIND){
+			$$ = new VariableEntry($2, VariableEntry::VarKind::GLOBAL_VAR, ty, $4);
+		}
+		else if(ste->kind() == SymTabEntry::Kind::FUNCTION_KIND){
+			$$ = new VariableEntry($2, VariableEntry::VarKind::LOCAL_VAR, ty, $4);
+		}
+		ErrorST est = ste->insert($$);
+		if(est == DUPLICATE_SYM){
+			errMsg("Duplicate variable declaration");
+		}
+		
+		$$->print(cout, 0);
+		cout << endl;
+		}
+| variable_decl1: variable_decl1 TOK_COMMA TOK_IDENT TOK_ASSIGN expr{
+		SymTabEntry* ste = stm.currentScope();
+		if(ste->kind() == SymTabEntry::Kind::GLOBAL_KIND){
+			$$ = new VariableEntry($3, VariableEntry::VarKind::GLOBAL_VAR, ty, $5);
+		}
+		else if(ste->kind() == SymTabEntry::Kind::FUNCTION_KIND){
+			$$ = new VariableEntry($3, VariableEntry::VarKind::LOCAL_VAR, ty, $5);
+		}
+		ErrorST est = ste->insert($$);
+		if(est == DUPLICATE_SYM){
+			errMsg("Duplicate variable declaration");
+		}
+		cout << ", ";
+		$$->print(cout, 0);
+	};
+
+/***********  FUNCTION DECLARATIONS **********/
+
+function_decl: function_header    {     /* determine scope and then perform print*/
+
+					SymTabEntry* ste = (SymTabEntry* )(stm.currentScope());
+					if(ste->kind()==SymTabEntry::Kind::FUNCTION_KIND){
+						FunctionEntry* fe = (FunctionEntry* )ste;
+						fe->print(cout, 0);
+					}
+					
+					ErrorST est = stm.leaveScope();
+					}
+| function_header fun_rest        {	
+					SymTabEntry* ste = (SymTabEntry* )(stm.currentScope());
+                                        if(ste->kind()==SymTabEntry::Kind::FUNCTION_KIND){
+                                                FunctionEntry* fe = (FunctionEntry* )ste;
+                                                fe->print(cout, 0);
+					}
+					ErrorST est = stm.leaveScope();
+					};
+
+function_header: function_name TOK_LPAREN formal_param_list TOK_RPAREN
+
+function_name: type TOK_IDENT {
+	$$ = new FunctionEntry($2, $1);
+	/* insert function into global scope, then enter scope */
+	ErrorST est = stm.insert($$);
+	est = stm.enterScope($$);
+	
+};
+
+fun_rest: compoundStmt {
+			FunctionEntry* fe = dynamic_cast<FunctionEntry* >(stm.currentScope());
+			fe->body($1);
+};
+
+/************* EVENT DECLARATIONS HERE ***************/
+
+event_decl: event_decl_hdr TOK_LPAREN formal_param_list TOK_RPAREN {
+			/* determine scope and call print on global entry */
+			SymTabEntry* ste = (SymTabEntry* )(stm.currentScope());
+			if(ste->kind() == SymTabEntry::Kind::EVENT_KIND){
+				EventEntry* ee = (EventEntry* )ste;
+				ee->print(cout, 0);
+			}
+			/* leave event scope */
+			ErrorST est = stm.leaveScope();
+					
+};
+
+event_decl_hdr: TOK_EVENT TOK_IDENT {
+			$$ = new EventEntry($2);
+			/* same for events also */
+			ErrorST est = stm.insert($$);
+			est = stm.enterScope($$);
+		};
+
+/************** EVENT PATTERNS HERE ****************/
+
+event_pattern: primitive_pat {
+					$$ = $1;
+					$$->kind(BasePatNode::PatNodeKind::PRIMITIVE);
+				}
+| TOK_LPAREN event_pattern TOK_RPAREN   { $$ = $2; } 
+| event_pattern TOK_PAT_OR event_pattern  {
+					$$ = new PatNode(BasePatNode::PatNodeKind::OR, $1, $3);
+				}
+| event_pattern TOK_PAT_NOT {
+				$$ = new PatNode(BasePatNode::PatNodeKind::NEG, $1);
+				}
+| event_pattern TOK_PAT_STAR  {
+				$$ = new PatNode(BasePatNode::PatNodeKind::STAR, $1);
+				}
+| event_pattern TOK_COLON event_pattern {
+				$$ = new PatNode(BasePatNode::PatNodeKind::SEQ, $1, $3);
+				};
+
+/***********  PRIMITIVE PATTERNS HERE *************/
+
+primitive_pat: event TOK_LPAREN id_list TOK_RPAREN {
+				EventEntry* ee = dynamic_cast<EventEntry* >(stm.lookUp($1));
+				vector<VariableEntry* >* params = new vector<VariableEntry* >;
+				for(vector<string>::iterator i=$3->begin(); i!=$3->end(); ++i){
+					SymTab* map = ee->symTab();
+					SymTab::iterator j = map->begin();
+					VariableEntry* v = (VariableEntry*)(*j) ;
+					Type* t1 = v->type();
+					VariableEntry* re = new VariableEntry(*i, VariableEntry::VarKind::PARAM_VAR, t1);
+                                        (*params).push_back(re);
+
+				}
+				$$ = new PrimitivePatNode(ee, params);
+				
+				(*id).clear();
+}
+| event TOK_LPAREN id_list TOK_RPAREN TOK_BITOR expr {
+				EventEntry* ee = dynamic_cast<EventEntry* >(stm.lookUp($1));
+				vector<VariableEntry* >* params = new vector<VariableEntry* >;
+                                for(vector<string>::iterator i=$3->begin(); i!=$3->end(); ++i){ 
+                                        SymTab* map = ee->symTab();
+                                        SymTab::iterator j = map->begin();
+                                        VariableEntry* v = (VariableEntry*)(*j) ;
+                                        Type* t1 = v->type();
+                                        VariableEntry* re = new VariableEntry(*i, VariableEntry::VarKind::PARAM_VAR, t1);
+                                        (*params).push_back(re);
+
+                                }
+				$$ = new PrimitivePatNode(ee, params, $6);
+				
+				(*id).clear();
+}
+| TOK_ANY                     {		
+					SymTabEntry* ste = stm.currentScope();
+					if(ste->kind() == SymTabEntry::Kind::GLOBAL_KIND){
+						BlockEntry* be = new BlockEntry("any");
+						ErrorST est = stm.insert(be);
+						est = stm.enterScope(be);
+				}
+			};
+
+event: TOK_IDENT { 
+	/* enter block scope */
+	SymTabEntry *ste = stm.currentScope();
+        if(ste->kind() == SymTabEntry::Kind::GLOBAL_KIND){
+                BlockEntry* be = new BlockEntry($1);
+		/* insert the event pattern */
+		ErrorST est = stm.insert(be); 
+                est = stm.enterScope(be); 
+        }
+};
+
+
+/*********************** RULES HERE *************************/
+
+rule: event_pattern TOK_ARROW stmt {
+	
+	BlockEntry* be = (BlockEntry* )(stm.currentScope());
+	$$ = new RuleNode(be, $1, $3);
+	
+	ErrorST est = stm.leaveScope();
+	
+
+};
+
+/* rules go into global scope */
+
+rule_star: rule_star rule     {  ge = (GlobalEntry*)(stm.currentScope());
+				 ge->addRule($2); }
+| rule                         { ge = (GlobalEntry*)(stm.currentScope()); 
+				 ge->addRule($1); }
+;
+
+
+/********************** PARAMETERS HERE **************************/
+
+formal_param_list: %empty 
+| formal_param_plus
+;
+
+formal_param_plus: formal_param_plus TOK_COMMA formal_param
+| formal_param
+;
+
+
+formal_param: type TOK_IDENT  {
+		SymTabEntry* ste = stm.currentScope();
+		if(ste->kind() == SymTabEntry::Kind::FUNCTION_KIND || ste->kind() == SymTabEntry::Kind::EVENT_KIND){
+					$$ = new VariableEntry($2, VariableEntry::VarKind::PARAM_VAR, $1);
+				        /* inserting into map */
+					ErrorST est = ste->insert($$);
+					if(est == DUPLICATE_SYM){
+						errMsg("duplicate formal parameter declaration");
+					}
+		}
+};
+
+id_list: %empty            { $$ = id; }
+| id_plus
+
+
+id_plus: TOK_IDENT         {
+				(*id).push_back($1);
+				$$ = id;
+				}
+| id_plus TOK_COMMA TOK_IDENT   {
+				     (*id).push_back($3);
+				     $$ = id;
+				};
+
+/********************** STATEMENTS HERE **********************/
+
+stmt: if_then_else_stmt            { }
+| simple_stmt TOK_SEMICOLON      {  }
+| expr TOK_SEMICOLON             { $$ = new ExprStmtNode($1); }
+| compoundStmt                      {  }
+| compoundStmt TOK_SEMICOLON	     {   }
+| TOK_SEMICOLON                  { $$ = 0; }
+;
+
+compoundStmt: TOK_LBRACE stmt_plus TOK_RBRACE { $$ = new CompoundStmtNode( $2);
+						
+					       };   
+
+stmt_plus: stmt  {
+	            $$ = new list<StmtNode*>();
+		    auto it = $$->end();
+		    if($1 != nullptr){
+		          $$->insert(it, $1);
+		    }
+	            
+		 }  
+| stmt_plus stmt { 
+		   auto it = $1->end();
+		   if( $2 != nullptr){
+		           $1-> insert(it, $2);
+		   }
+		   $$ = $1;
+}
+;
+
+
+if_then_else_stmt: TOK_IF expr stmt { $$ = new IfNode($2, $3); 
+				      }
+| TOK_IF expr stmt TOK_ELSE stmt { $$ = new IfNode($2, $3, $5);
+		                  };
+
+/* simple stmt could be a variable declaration also--take care */
+
+
+simple_stmt: TOK_RETURN expr    {     FunctionEntry* fe = dynamic_cast<FunctionEntry* >(stm.currentScope(SymTabEntry::Kind::FUNCTION_KIND));
+				      $$ = new ReturnStmtNode($2, fe); 
+				      };
+| variable_decl
+
+/*****************  EXPRESSIONS HERE ************************/
+
+/* expr is composed of opnodes, literals and invocation nodes and also ref_expr */
+
+
+expr: expr TOK_PLUS expr    {  
+			       $$ = new OpNode(OpNode::OpCode::PLUS, $1, $3);
+			       }
+| expr TOK_MINUS expr   {
+			      $$ = new OpNode(OpNode::OpCode::MINUS, $1, $3); 
+			}
+| expr TOK_MULT expr    {     
+			      $$ = new OpNode(OpNode::OpCode::MULT, $1, $3);
+			    }
+| expr TOK_DIV expr     { $$ = new OpNode(OpNode::OpCode::DIV, $1, $3); 
+	                      }
+| expr TOK_MOD expr     { $$ = new OpNode(OpNode::OpCode::MOD, $1, $3);
+			      }
+| expr TOK_BITXOR expr  { $$ = new OpNode(OpNode::OpCode::BITXOR, $1, $3);
+			    }
+| expr TOK_SHL expr     { $$ = new OpNode(OpNode::OpCode::SHL, $1, $3);
+			     }
+| expr TOK_SHR expr     { $$ = new OpNode(OpNode::OpCode::SHR, $1, $3);
+			   }
+| expr TOK_LE expr      { $$ = new OpNode(OpNode::OpCode::LE, $1, $3);
+			  }
+| expr TOK_LT expr      { $$ = new OpNode(OpNode::OpCode::LT, $1, $3);
+			  }
+| expr TOK_EQ expr      { $$ = new OpNode(OpNode::OpCode::EQ, $1, $3);
+			   }
+| expr TOK_GE expr      { $$ = new OpNode(OpNode::OpCode::GE, $1, $3);
+			   }
+| expr TOK_GT expr      { $$ = new OpNode(OpNode::OpCode::GT, $1, $3);
+			    }
+| expr TOK_OR expr      { $$ = new OpNode(OpNode::OpCode::OR, $1, $3);
+			     }
+| expr TOK_BITOR expr   { $$ = new OpNode(OpNode::OpCode::BITOR, $1, $3); 
+			     }
+| expr TOK_NE expr     { $$ = new OpNode(OpNode::OpCode::NE, $1, $3);
+			      }
+| expr TOK_BITAND expr  { $$ = new OpNode(OpNode::OpCode::BITAND, $1, $3);
+			      }
+| expr TOK_AND expr     { $$ = new OpNode(OpNode::OpCode::AND, $1, $3);
+			   } 
+| TOK_NOT expr          { $$ = new OpNode(OpNode::OpCode::NOT, $2); 
+			  }
+| TOK_BITNOT expr       { $$ = new OpNode(OpNode::OpCode::BITNOT, $2);
+			 }
+| literal               { $$ = new ValueNode($1); }
+| TOK_LPAREN expr TOK_RPAREN    {   $$ = $2;   }
+| TOK_MINUS expr %prec TOK_UMINUS { $$ = new OpNode(OpNode::OpCode::UMINUS, $2); }
+| ref_expr
+| function_invocation
+| asg_stmt
+;
+
+
+function_invocation : TOK_IDENT TOK_LPAREN expr_list TOK_RPAREN    { SymTabEntry* ste = stm.lookUp($1);
+						                     $$ = new InvocationNode(ste, $3);
+						      };
+
+asg_stmt: ref_expr TOK_ASSIGN expr  { $$ = new OpNode(OpNode::OpCode::ASSIGN, $1, $3);
+                             };
+
+
+ref_expr : TOK_IDENT  {
+			   SymTabEntry* ste = stm.lookUpInScope($1, SymTabEntry::Kind::VARIABLE_KIND);
+			   /* if not found in scope-- check in enclosing scopes -- if not found then also 
+			      raise an error */
+			   if(ste == NULL){
+				ste = stm.lookUp($1);
+				if(ste == NULL) errMsg("Identifier previously undeclared");	
+				}
+                           $$ = new RefExprNode($1, ste);
+                         };
+
+                                
+expr_list: %empty              { $$ = 0; }
+| expr_plus                    { $$ = $1; }
+
+expr_plus: expr                {
+				 $$ = new vector<ExprNode* >();
+				 auto it2 = $$->end();
+				 if($1 != nullptr){
+				       $$->insert(it2, $1);
+				 }
+				 
+			       }
+| expr_plus TOK_COMMA expr     { 
+				 $1->push_back($3);
+				 $$ = $1;
+				  
+				};  
+ 
+literal: TOK_UINTNUM    { $$ = new Value($1, Type::TypeTag::UINT);
+			}
+| TOK_DOUBLENUM         { $$ = new Value($1);
+			}
+| TOK_STRCONST          { $$ = new Value($1);
+			}
+| TOK_TRUE                  { $$ = new Value(true);
+			}
+| TOK_FALSE                 { $$ = new Value(false);
+			}
+;     
+
+
+/*************************  TYPES HERE **************************/
+
+type: baseType
+| TOK_UNSIGNED TOK_INT { $$ = new Type(Type::TypeTag::UINT); }
+| TOK_IDENT { 
+	      SymTabEntry * ste = stm.lookUp($1);
+	      if(ste != nullptr){ $$ = new Type(ste, Type::TypeTag::CLASS ); $$->print(cout, 0); }
+	   }
+;
+
+baseType: TOK_VOID  { $$ = new Type(Type::TypeTag::VOID); }
+| TOK_BOOL  { $$ = new Type(Type::TypeTag::BOOL);  }
+| TOK_STRING { $$ = new Type(Type::TypeTag::STRING);  }
+| TOK_BYTE { $$ = new Type(Type::TypeTag::BYTE); }
+| TOK_INT { $$ = new Type(Type::TypeTag::INT); }
+| TOK_DOUBLE { $$ = new Type(Type::TypeTag::DOUBLE); }
+;
+%%
+
+
+
+
